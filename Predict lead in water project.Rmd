@@ -1,0 +1,264 @@
+---
+title: "Predict lead level in water in Flint, MI"
+author: "Angie Dinh"
+date: "February 27, 2017"
+output: html_document
+---
+
+#I. Context:
+The problem and data is from Hack2o - the data science Hackathon at Umass on Feb 24-25, 2017. 
+
+Some areas in Flint, MI have pipes that are corrosive. As a result, there is a risk of high lead level in water, which is very harmful to people's health. However, investigating lead level in water is very expensive and time-consuming. The goal of the project is to analyze data on lead level, copper level, and iron level in water to find trends that can benefit both residents and researchers. In particular, if a relationship between copper level/iron level and lead level can be found, we can predict lead level in water, reducing cost for lead testing.
+
+#II. Data Cleaning
+
+Load data
+
+```{r, message=FALSE}
+library(chron)
+library(mosaic)
+library(dplyr)
+library(plm)
+library(boot)
+lead_data <- read.csv("C:/Users/stuadmin/Desktop/Projects/Hack2o project/Copper_Iron_and_Lead_for_GriD.csv", stringsAsFactor=FALSE)
+
+```
+
+Convert units from Mgl to Ugl and remove the outlier (highest point in lead value)
+```{r, message=FALSE}
+lead_data$Iron_Result_Ugl=1000*lead_data$Result.1
+lead_data=lead_data[-which.max(lead_data$X.6),]
+```
+
+Convert sample time from discrete value into continuous value
+```{r}
+lead_data$time=as.numeric(substr(lead_data$SampleTime,1,2))+(as.numeric(substr(lead_data$SampleTime,4,5)))/60
+
+```
+
+The sample time is not correct - they didn't record the second. I fix it as below
+```{r}
+for (i in 2:nrow(lead_data)){
+  if(substr(lead_data$Samp_No[i],1,1)!="D" & substr(lead_data$Samp_No[i],1,3)!="S01"){
+    lead_data$time[i]=lead_data$time[i-1]+0.01
+  }
+}
+```
+
+Exclude constant variables: 
+```{r}
+var_excluded=names(lead_data) %in% c("Analyte", "Result_Units", "Analyte.1", "Result_Units.1", "X.5", "X.7")
+lead_data=lead_data[!var_excluded]
+```
+
+Exclude observations with duplicate in both household ID and time
+```{r}
+lead_data$time_id=paste(lead_data$PropertyInfoDBID, lead_data$time)
+lead_data <- lead_data %>%
+  distinct(time_id, .keep_all = TRUE)
+lead_data=lead_data[,-ncol(lead_data)]
+```
+
+Rename 
+```{r}
+lead_data <- lead_data %>%
+  rename("Copper_Result"=Result,
+         "Lead_Result"=X.6)
+```
+
+#III. Project question:
+
+How this analysis benefits both the household residents and the researchers?
+
+##For household residents: 
+
+###How risky is the lead level at the sampled households?
+
+The safe level of lead in water is under 15 Ug/L. 
+```{r}
+#Filter risky household
+risky_households=subset(lead_data, lead_data$Lead_Result>15)
+
+#Plot the risk level: 
+base=rep(15,nrow(risky_households))
+  ggplot(risky_households,
+         aes(x=risky_households$PropertyInfoDBID)) +
+    ggtitle("Lead level among high-risk households")+
+    geom_point(aes(y = risky_households$Lead_Result), color="red",
+               size=(risky_households$Lead_Result*0.07)) +
+    geom_line(aes(y = base), color="blue") +
+    labs(x="Household", y="Lead level in water (Ug/L)") + 
+    geom_text(aes(y=risky_households$Lead_Result,
+                  x=risky_households$PropertyInfoDBID,label=round(risky_households$Lead_Result,1)),
+              size=risky_households$Lead_Result*0.015,check_overlap = TRUE) + 
+    geom_text(aes(y=0,
+                  x=40,label="Safe level: 15 Ug/L"))
+```
+
+###When is the time with highest lead levels? 
+
+```{r}
+p5 <- ggplot(lead_data, aes(x = time, 
+                          y = Lead_Result))
+
+Household=as.factor(lead_data$PropertyInfoDBID)
+
+p5 + geom_line(aes(color = Household))+
+  labs(x="Time of the day",y="Lead level in water (Ug/L)") +
+  ggtitle("Lead level at different time of the day")
+
+```
+
+
+```{r, message=FALSE}
+#Lead level over time in each sample
+unique_house=unique(lead_data$PropertyInfoDBID)
+eight_house_data=subset(lead_data, lead_data$PropertyInfoDBID %in% unique_house[1:8])
+
+p5 <- ggplot(eight_house_data, aes(x=time,y=Lead_Result))
+p5 + geom_line()+facet_wrap(~PropertyInfoDBID, ncol=4, scales="free") +
+  labs(x="Time of the day", y="Lead level in water (Ug/L)") +
+  ggtitle("'First flush' effect: The first water coming out of the tap has the highest lead level")
+
+```
+
+
+##For researchers:
+
+```{r, message=FALSE}
+p5 <- ggplot(lead_data, aes(x = Copper_Result, 
+                          y = Lead_Result))
+p5 + geom_point(aes(),
+                color="blue") +
+  labs(x="Copper Level (Ug/L)", y="Lead Level (Ug/L)") +
+  ggtitle("Relationship between copper level and lead level in water")
+```
+
+
+```{r, message=FALSE}
+p5 <- ggplot(lead_data, aes(x = Iron_Result_Ugl, 
+                          y = Lead_Result))
+p5 + geom_point(aes(),
+                color = "purple") +
+  labs(x="Iron Level (Ug/L)", y="Lead Level (Ug/L)") +
+  ggtitle("Relationship between iron level and lead level in water")
+
+```
+
+#III. Model: 
+
+The data is a panel data; therefore, the model can be a fixed effect model, random effect model, or a regular OLS regression
+
+```{r}
+library(foreign)
+#install.packages("gplots")
+library(gplots)
+```
+
+Fixed effect Model
+```{r}
+fixed <- plm(Lead_Result ~ Copper_Result+Iron_Result_Ugl, data=lead_data, index=c("PropertyInfoDBID", "time"), model="within")
+```
+
+
+###Random Effect Model
+```{r}
+random <- plm(Lead_Result ~ Copper_Result+Iron_Result_Ugl, data=lead_data, index=c("PropertyInfoDBID", "time"), model="random")
+```
+
+###Choosing between fixed and random effects model
+```{r}
+phtest(fixed, random)
+```
+This test shows that the random effect model is better
+
+###Choosing between fix/random effect and OLS:
+```{r}
+pool <- plm(Lead_Result ~ Copper_Result+Iron_Result_Ugl, data=lead_data, index=c("PropertyInfoDBID", "time"), model="pool")
+```
+
+```{r}
+ plmtest(pool, type=c("bp")) 
+```
+
+This test shows that fixed/random effect models is better than the regular OLS 
+
+Therefore, we see that random effect model is better than fixed effect model, which are both better than OLS model. I decide to use a random effect model
+
+###Model Summary
+
+```{r}
+summary(random)
+```
+
+According to this model, there is a positive, significant relationship between copper level and lead level, and a similar positive, significant relationship between iron level and lead level. However, we need to test for autocorrelation.
+
+```{r, message=FALSE, warning=FALSE}
+pbgtest(random)
+```
+
+This test shows that there is autocorrelation in the model. Therefore, we cannot intepret the coefficients as they are. In order to test for the relationship, I implement bootstrap on the model 
+
+```{r}
+bs <- function(formula, data, indices) {
+  d <- data[indices,] # allows boot to select sample 
+  fit <- plm(formula, data=unique(d), index=c("PropertyInfoDBID", "time"), model="random")
+  return(coef(fit)) 
+} 
+# bootstrapping with 1000 replications 
+results <- boot(data=lead_data, statistic=bs, 
+  	R=500, formula=Lead_Result ~ Copper_Result+Iron_Result_Ugl)
+
+plot(results, index=2) # wt 
+plot(results, index=3) # disp 
+
+```
+
+The bootstrapped distributions of the coefficients are not normal, but we can see that they are all distributed above 0. Therefore the correlation between lead level and copper level, as well as lead level and iron level is still positive, despite the autocorrelation.
+
+###Prediction 
+
+I use 10-fold cross-validation with a 90/10 train/test split.
+For testing, if the lead level in water is greater than 15, it is labeled unsafe. 
+I test if my model can correctly predict safe/unsafe water.
+
+
+```{r}
+library(lme4)
+
+n_folds <- 10
+
+folds_i <- sample(rep(1:n_folds, length.out = nrow(lead_data)))
+percentage_accuracy=rep(0,n_folds)
+mse=rep(0,n_folds)
+for (k in 1:n_folds) {
+  test_i <- which(folds_i == k)
+  train_xy <- lead_data[-test_i, ]
+  test_xy <- lead_data[test_i, ]
+  model=plm(Lead_Result ~ Copper_Result+Iron_Result_Ugl, data=train_xy, index=c("PropertyInfoDBID", "time"), model="random")
+  coef=model$coefficients
+  prediction=coef[1]+coef[2]*test_xy$Copper_Result+coef[3]*test_xy$Iron_Result_Ugl
+  harmful=ifelse(prediction>15,1,0)
+  mse[k]=sqrt(mean((prediction-test_xy$Lead_Result)^2))
+  harmful_actual=ifelse(test_xy$Lead_Result > 15,1,0)
+  accuracy=ifelse(harmful==harmful_actual,1,0)
+  percentage_accuracy[k]=sum(accuracy)/length(accuracy)
+}
+```
+
+I now plot the percentage accuracy
+
+```{r}
+myplot <- ggplot(data.frame(percentage_accuracy), aes(x = seq(1,length(percentage_accuracy)), 
+                                                             y = percentage_accuracy*100))
+myplot + geom_line(aes()) +
+  labs(x="Cross-Validation Index", y="Accuracy") + 
+  geom_text(aes(label=round(percentage_accuracy*100,1)))
+```
+
+
+This model does not do a very good job in prediction, since the accuracy rate is quite low. I believe that the reason is that there is autocorrelation in the model, even though the bootstrapped results show that the significant relationship still exists despite autocorrelation. Therefore, this model is still useful for interpretation despite not performing well in prediction.
+
+#V. Conclusion
+
+The model does not predict well, but it shows that there is a significant relationship between copper/iron level and lead level in water in Flint, MI. Going forward with this topic, I believe that we should gather more data, so that we can use the maximum lead level instead of the time series. Additionally, we can also fit a better time series model. 
